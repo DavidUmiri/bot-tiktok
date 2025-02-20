@@ -151,20 +151,55 @@ class VideoContenido(IContenido):
             video_response = http.head(self.video_url, timeout=30)
             content_length = int(video_response.headers.get('content-length', 0))
             
-            # 50MB (límite del servidor por defecto de Telegram)
-            if content_length > 52428800:
-                bot.send_message(chat_id, "⚠️ El video supera el límite de 50MB del servidor de Telegram. Te envío el enlace para que puedas descargarlo:")
-                bot.send_message(chat_id, self.video_url)
+            # Si el video es más grande que 50MB, intentar enviarlo como documento
+            if content_length > 52428800:  # 50MB
+                mensaje_descarga = bot.send_message(chat_id, "📦 El video es grande, intentando enviar como documento...")
+                try:
+                    # Intentar enviar como documento
+                    doc = bot.send_document(
+                        chat_id,
+                        self.video_url,
+                        caption="🎥 Aquí tienes el video sin marca de agua (como documento)",
+                        timeout=60  # Aumentamos el timeout para archivos grandes
+                    )
+                    bot.delete_message(chat_id, mensaje_descarga.message_id)
+                except Exception as doc_error:
+                    logger.error(f"Error al enviar como documento: {str(doc_error)}")
+                    bot.edit_message_text(
+                        "⚠️ No se pudo enviar el video.\n\n"
+                        f"📥 Puedes descargarlo desde este enlace:\n{self.video_url}",
+                        chat_id,
+                        mensaje_descarga.message_id
+                    )
             else:
-                bot.send_video(chat_id, self.video_url, caption="🎥 Aquí tienes el video sin marca de agua.")
+                # Para videos pequeños, intentar enviar normalmente
+                mensaje_descarga = bot.send_message(chat_id, "⏳ Descargando video... Por favor espera.")
+                try:
+                    video_message = bot.send_video(
+                        chat_id, 
+                        self.video_url, 
+                        caption="🎥 Aquí tienes el video sin marca de agua.",
+                        supports_streaming=True
+                    )
+                    bot.delete_message(chat_id, mensaje_descarga.message_id)
+                except Exception as e:
+                    bot.edit_message_text(
+                        f"⚠️ No se pudo enviar el video.\n\nPuedes descargarlo desde aquí:\n{self.video_url}",
+                        chat_id,
+                        mensaje_descarga.message_id
+                    )
             
             if self.audio_url:
                 self.enviar_audio(chat_id)
             else:
                 logger.info("No se encontró URL de audio para este contenido")
+                
         except Exception as e:
             logger.error(f"Error al enviar video: {str(e)}")
-            bot.send_message(chat_id, f"❌ Error al enviar el video. Puedes intentar descargarlo directamente desde este enlace:\n{self.video_url}")
+            bot.send_message(
+                chat_id, 
+                f"❌ Error al procesar el video. Puedes intentar descargarlo directamente desde este enlace:\n{self.video_url}"
+            )
 
     def enviar_audio(self, chat_id: int):
         if not self.audio_url:
