@@ -83,22 +83,29 @@ class TikTokExtractor(IExtractor):
             if not data.get("data"):
                 raise ValueError("No se encontraron datos en la respuesta de la API.")
             
-            # Procesar y asignar la URL del audio correctamente
             video_data = data["data"]
             
-            # Intentar obtener la URL del audio de diferentes campos posibles
+            # Procesar y asignar la URL del audio
             audio_url = None
             if "music" in video_data and video_data["music"]:
                 audio_url = video_data["music"]
             elif "music_url" in video_data and video_data["music_url"]:
                 audio_url = video_data["music_url"]
-            elif "audio" in video_data and video_data["audio"]:
-                audio_url = video_data["audio"]
-                
-            logger.info(f"Audio URL encontrada: {audio_url}")
-            video_data["audio"] = audio_url
+            elif "music_info" in video_data and video_data["music_info"].get("play_url"):
+                audio_url = video_data["music_info"]["play_url"]
             
+            # Asegurarse de que las imágenes estén en una lista si existen
+            if "images" in video_data and isinstance(video_data["images"], str):
+                video_data["images"] = [video_data["images"]]
+            elif "image_post_info" in video_data:
+                video_data["images"] = [img["display_image"]["url_list"][0] for img in video_data["image_post_info"]]
+            
+            logger.info(f"Audio URL encontrada: {audio_url}")
+            logger.info(f"Tipo de contenido: {'imágenes' if 'images' in video_data else 'video'}")
+            
+            video_data["audio"] = audio_url
             return video_data
+            
         except Exception as e:
             logger.error(f"Error en extractor: {str(e)}")
             raise Exception(f"Error al conectar con la API: {str(e)}")
@@ -168,27 +175,49 @@ class ImagenesContenido(IContenido):
 
     def enviar_contenido(self, chat_id: int):
         try:
+            media_group = []
             for img_url in self.imagenes_urls:
-                bot.send_photo(chat_id, img_url)
-            bot.send_message(chat_id, "🖼️ Estas son las imágenes de la publicación.")
-            self.enviar_audio(chat_id)
+                media_group.append(telebot.types.InputMediaPhoto(img_url))
+            bot.send_media_group(chat_id, media_group)
+            if self.audio_url:
+                self.enviar_audio(chat_id)
         except Exception as e:
-            bot.send_message(chat_id, f"Error al enviar el contenido: {e}")
+            logger.error(f"Error al enviar imágenes: {str(e)}")
+            bot.send_message(chat_id, f"Error al enviar el contenido: {str(e)}")
 
     def enviar_audio(self, chat_id: int):
-        if self.audio_url:
-            try:
-                # Generar nombre único para el archivo
-                audio_filename = f"audio_{str(uuid.uuid4())[:8]}.mp3"
-                audio_path = audio_filename
-                
-                with open(audio_path, "wb") as f:
-                    f.write(requests.get(self.audio_url).content)
-                with open(audio_path, "rb") as audio:
-                    bot.send_audio(chat_id, audio, caption=f"🔊 Audio de la publicación: {audio_filename}")
+        if not self.audio_url:
+            return
+            
+        audio_path = None
+        try:
+            logger.info(f"Intentando descargar audio desde: {self.audio_url}")
+            audio_response = http.get(self.audio_url, stream=True)
+            audio_response.raise_for_status()
+            
+            # Generar nombre único para el archivo
+            audio_filename = f"audio_{str(uuid.uuid4())[:8]}.mp3"
+            audio_path = os.path.join('temp', audio_filename)
+            
+            # Asegurar que el directorio temp existe
+            os.makedirs('temp', exist_ok=True)
+            
+            with open(audio_path, "wb") as f:
+                for chunk in audio_response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            logger.info(f"Audio descargado en: {audio_path}")
+            
+            with open(audio_path, "rb") as audio:
+                bot.send_audio(chat_id, audio, caption="🔊 Audio de la publicación")
+        except Exception as e:
+            logger.error(f"Error con el audio: {str(e)}")
+            bot.send_message(chat_id, f"❌ Error con el audio: {str(e)}")
+        finally:
+            if audio_path and os.path.exists(audio_path):
                 os.remove(audio_path)
-            except Exception as e:
-                bot.send_message(chat_id, f"Error al enviar el audio: {e}")
+                logger.info(f"Archivo temporal {audio_path} eliminado")
 
 # ===================== Factory para Crear el Contenido =====================
 
