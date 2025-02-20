@@ -84,6 +84,7 @@ class TikTokExtractor(IExtractor):
                 raise ValueError("No se encontraron datos en la respuesta de la API.")
             
             video_data = data["data"]
+            logger.info(f"Datos recibidos de la API: {video_data.keys()}")
             
             # Procesar y asignar la URL del audio
             audio_url = None
@@ -94,16 +95,39 @@ class TikTokExtractor(IExtractor):
             elif "music_info" in video_data and video_data["music_info"].get("play_url"):
                 audio_url = video_data["music_info"]["play_url"]
             
-            # Asegurarse de que las imágenes estén en una lista si existen
-            if "images" in video_data and isinstance(video_data["images"], str):
-                video_data["images"] = [video_data["images"]]
-            elif "image_post_info" in video_data:
-                video_data["images"] = [img["display_image"]["url_list"][0] for img in video_data["image_post_info"]]
+            # Mejorada la detección de imágenes
+            images = []
+            if "images" in video_data and video_data.get("images"):
+                if isinstance(video_data["images"], list):
+                    images.extend(video_data["images"])
+                elif isinstance(video_data["images"], str):
+                    images.append(video_data["images"])
+                logger.info(f"Imágenes detectadas (formato images): {len(images)}")
             
-            logger.info(f"Audio URL encontrada: {audio_url}")
-            logger.info(f"Tipo de contenido: {'imágenes' if 'images' in video_data else 'video'}")
+            if "image_post_info" in video_data:
+                for img in video_data.get("image_post_info", []):
+                    if isinstance(img, dict):
+                        if "display_image" in img:
+                            url_list = img["display_image"].get("url_list", [])
+                            if url_list and isinstance(url_list, list) and url_list[0]:
+                                images.append(url_list[0])
+                        elif "images" in img:
+                            url_list = img["images"]
+                            if isinstance(url_list, list) and url_list:
+                                images.extend(url_list)
+                logger.info(f"Imágenes detectadas (formato image_post_info): {len(images)}")
+            
+            # Asegurarse de que play no esté presente en caso de imágenes
+            if images:
+                video_data["images"] = images
+                video_data.pop("play", None)  # Eliminar play si existe para forzar el modo imagen
             
             video_data["audio"] = audio_url
+            
+            logger.info(f"Audio URL encontrada: {audio_url}")
+            logger.info(f"Tipo de contenido final: {'imágenes' if video_data.get('images') else 'video'}")
+            logger.info(f"Total de imágenes encontradas: {len(video_data.get('images', []))}")
+            
             return video_data
             
         except Exception as e:
@@ -170,20 +194,44 @@ class ImagenesContenido(IContenido):
     Clase para manejar contenido de tipo imágenes.
     """
     def __init__(self, imagenes_urls: list, audio_url: str):
-        self.imagenes_urls = imagenes_urls
+        if isinstance(imagenes_urls, str):
+            imagenes_urls = [imagenes_urls]
+        self.imagenes_urls = imagenes_urls if isinstance(imagenes_urls, list) else []
         self.audio_url = audio_url
 
     def enviar_contenido(self, chat_id: int):
         try:
+            if not self.imagenes_urls:
+                bot.send_message(chat_id, "❌ No se encontraron imágenes en este contenido.")
+                return
+
+            logger.info(f"Intentando enviar {len(self.imagenes_urls)} imágenes")
             media_group = []
+            
             for img_url in self.imagenes_urls:
-                media_group.append(telebot.types.InputMediaPhoto(img_url))
-            bot.send_media_group(chat_id, media_group)
-            if self.audio_url:
-                self.enviar_audio(chat_id)
+                logger.info(f"Procesando imagen: {img_url}")
+                # Verificar que la URL no sea None o vacía
+                if img_url and isinstance(img_url, str) and img_url.strip():
+                    try:
+                        media = telebot.types.InputMediaPhoto(img_url)
+                        media_group.append(media)
+                    except Exception as e:
+                        logger.error(f"Error al procesar imagen {img_url}: {str(e)}")
+            
+            if media_group:
+                bot.send_message(chat_id, "📸 Enviando imágenes...")
+                # Enviar imágenes en grupos de 10 (límite de Telegram)
+                for i in range(0, len(media_group), 10):
+                    group = media_group[i:i+10]
+                    bot.send_media_group(chat_id, group)
+                    
+                if self.audio_url:
+                    self.enviar_audio(chat_id)
+            else:
+                bot.send_message(chat_id, "❌ No se pudieron procesar las imágenes.")
         except Exception as e:
             logger.error(f"Error al enviar imágenes: {str(e)}")
-            bot.send_message(chat_id, f"Error al enviar el contenido: {str(e)}")
+            bot.send_message(chat_id, f"❌ Error al enviar las imágenes: {str(e)}")
 
     def enviar_audio(self, chat_id: int):
         if not self.audio_url:
@@ -228,10 +276,16 @@ class ContenidoFactory:
     @staticmethod
     def crear_contenido(data: dict) -> IContenido:
         audio_url = data.get("audio", None)
-        if "play" in data and data["play"]:
-            return VideoContenido(video_url=data["play"], audio_url=audio_url)
-        elif "images" in data and data["images"]:
+        logger.info(f"Creando contenido. Tiene imágenes: {'images' in data}, Tiene video: {'play' in data}")
+        
+        # Primero verificar si hay imágenes y son válidas
+        if "images" in data and data["images"] and isinstance(data["images"], (list, str)):
+            logger.info("Creando contenido de tipo imagen")
             return ImagenesContenido(imagenes_urls=data["images"], audio_url=audio_url)
+        # Si no hay imágenes válidas, intentar con video
+        elif "play" in data and data["play"]:
+            logger.info("Creando contenido de tipo video")
+            return VideoContenido(video_url=data["play"], audio_url=audio_url)
         else:
             raise ValueError("El contenido no es reconocible como video o imágenes.")
 
