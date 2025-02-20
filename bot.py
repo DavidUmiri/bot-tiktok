@@ -76,7 +76,8 @@ class TikTokExtractor(IExtractor):
     def extraer(self, url: str) -> dict:
         api_url = f"{self.API_ENDPOINT}?url={url}"
         try:
-            response = http.get(api_url, timeout=10)
+            # Aumentamos el timeout a 30 segundos
+            response = http.get(api_url, timeout=30)
             response.raise_for_status()
             data = response.json()
             
@@ -146,14 +147,24 @@ class VideoContenido(IContenido):
 
     def enviar_contenido(self, chat_id: int):
         try:
-            bot.send_video(chat_id, self.video_url, caption="🎥 Aquí tienes el video sin marca de agua.")
+            # Verificar primero el tamaño del video
+            video_response = http.head(self.video_url, timeout=30)
+            content_length = int(video_response.headers.get('content-length', 0))
+            
+            # 50MB (límite del servidor por defecto de Telegram)
+            if content_length > 52428800:
+                bot.send_message(chat_id, "⚠️ El video supera el límite de 50MB del servidor de Telegram. Te envío el enlace para que puedas descargarlo:")
+                bot.send_message(chat_id, self.video_url)
+            else:
+                bot.send_video(chat_id, self.video_url, caption="🎥 Aquí tienes el video sin marca de agua.")
+            
             if self.audio_url:
                 self.enviar_audio(chat_id)
             else:
                 logger.info("No se encontró URL de audio para este contenido")
         except Exception as e:
             logger.error(f"Error al enviar video: {str(e)}")
-            bot.send_message(chat_id, f"Error al enviar el contenido: {str(e)}")
+            bot.send_message(chat_id, f"❌ Error al enviar el video. Puedes intentar descargarlo directamente desde este enlace:\n{self.video_url}")
 
     def enviar_audio(self, chat_id: int):
         if not self.audio_url:
