@@ -1,4 +1,9 @@
-python-telegram-bot==20.7
-requests==2.31.0
-python-dotenv==1.0.0
+certifi==2025.1.31
+charset-normalizer==3.4.1
+idna==3.10
+moviepy==1.0.3
+pip==24.0
+python-dotenv==1.0.1
 pyTelegramBotAPI==4.26.0
+requests==2.32.3
+urllib3==2.3.0

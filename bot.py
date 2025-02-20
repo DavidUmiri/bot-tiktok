@@ -7,6 +7,8 @@ from abc import ABC, abstractmethod
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from moviepy.editor import VideoFileClip
+import math
 
 # ===================== Configuración y Dependencias =====================
 
@@ -144,70 +146,91 @@ class VideoContenido(IContenido):
     def __init__(self, video_url: str, audio_url: str):
         self.video_url = video_url
         self.audio_url = audio_url
+        self.CHUNK_SIZE = 49 * 1024 * 1024  # 49MB para estar seguros
+
+    def dividir_video(self, video_path: str, duracion_total: float) -> list:
+        """Divide un video en partes más pequeñas"""
+        partes = []
+        video = VideoFileClip(video_path)
+        
+        # Calcular cuántas partes necesitamos
+        num_partes = math.ceil(os.path.getsize(video_path) / self.CHUNK_SIZE)
+        duracion_parte = duracion_total / num_partes
+        
+        logger.info(f"Dividiendo video en {num_partes} partes de {duracion_parte} segundos cada una")
+        
+        for i in range(num_partes):
+            tiempo_inicio = i * duracion_parte
+            tiempo_fin = min((i + 1) * duracion_parte, duracion_total)
+            
+            # Crear el nombre del archivo para esta parte
+            parte_path = os.path.join('temp', f'parte_{i+1}_{os.path.basename(video_path)}')
+            
+            # Extraer y guardar la parte del video
+            parte = video.subclip(tiempo_inicio, tiempo_fin)
+            parte.write_videofile(parte_path, codec='libx264')
+            partes.append(parte_path)
+            
+            logger.info(f"Parte {i+1} guardada en {parte_path}")
+        
+        video.close()
+        return partes
 
     def enviar_contenido(self, chat_id: int):
         try:
-            # Verificar primero el tamaño del video
-            video_response = http.head(self.video_url, timeout=30)
-            content_length = int(video_response.headers.get('content-length', 0))
+            video_temp_path = os.path.join('temp', f'video_{str(uuid.uuid4())[:8]}.mp4')
+            os.makedirs('temp', exist_ok=True)
             
-            logger.info(f"Tamaño del video: {content_length} bytes")
+            # Descargar el video completo
+            mensaje_descarga = bot.send_message(chat_id, "⏳ Descargando video...")
             
-            # Si el video es más grande que 50MB, intentar enviarlo como documento
-            if content_length > 52428800:  # 50MB
-                mensaje_descarga = bot.send_message(chat_id, "📦 El video es grande, intentando descargarlo...")
-                try:
-                    # Descargar el video primero
-                    video_temp_path = os.path.join('temp', f'video_{str(uuid.uuid4())[:8]}.mp4')
-                    os.makedirs('temp', exist_ok=True)
-                    
-                    logger.info(f"Descargando video a: {video_temp_path}")
-                    
-                    # Descargar el video en chunks
-                    response = http.get(self.video_url, stream=True, timeout=60)
-                    response.raise_for_status()
-                    
-                    with open(video_temp_path, 'wb') as video_file:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk:
-                                video_file.write(chunk)
-                    
-                    logger.info("Video descargado, intentando enviar como documento...")
-                    
-                    # Intentar enviar como documento desde el archivo local
-                    with open(video_temp_path, 'rb') as video_file:
-                        doc = bot.send_document(
-                            chat_id,
-                            video_file,
-                            caption="🎥 Aquí tienes el video sin marca de agua",
-                            timeout=120
-                        )
-                    bot.delete_message(chat_id, mensaje_descarga.message_id)
-                    
-                except Exception as doc_error:
-                    logger.error(f"Error detallado al enviar como documento: {str(doc_error)}")
-                    bot.edit_message_text(
-                        "⚠️ No se pudo enviar el video.\n\n"
-                        f"📥 Puedes descargarlo desde este enlace:\n{self.video_url}",
-                        chat_id,
-                        mensaje_descarga.message_id
-                    )
-                finally:
-                    # Limpiar archivo temporal
-                    if os.path.exists(video_temp_path):
-                        os.remove(video_temp_path)
-                        logger.info(f"Archivo temporal {video_temp_path} eliminado")
+            logger.info(f"Descargando video a: {video_temp_path}")
+            response = http.get(self.video_url, stream=True, timeout=60)
+            response.raise_for_status()
+            
+            with open(video_temp_path, 'wb') as video_file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        video_file.write(chunk)
+            
+            # Verificar el tamaño
+            if os.path.getsize(video_temp_path) > self.CHUNK_SIZE:
+                bot.edit_message_text("📦 Video grande detectado, dividiéndolo en partes...", chat_id, mensaje_descarga.message_id)
+                
+                # Obtener la duración del video
+                video = VideoFileClip(video_temp_path)
+                duracion_total = video.duration
+                video.close()
+                
+                # Dividir el video
+                partes = self.dividir_video(video_temp_path, duracion_total)
+                
+                # Enviar cada parte
+                for i, parte_path in enumerate(partes, 1):
+                    try:
+                        with open(parte_path, 'rb') as video_parte:
+                            bot.send_video(
+                                chat_id,
+                                video_parte,
+                                caption=f"🎥 Parte {i} de {len(partes)}",
+                                timeout=60
+                            )
+                        os.remove(parte_path)
+                    except Exception as e:
+                        logger.error(f"Error al enviar parte {i}: {str(e)}")
+                        continue
+                
+                bot.delete_message(chat_id, mensaje_descarga.message_id)
             else:
-                # Para videos pequeños, intentar enviar normalmente
-                mensaje_descarga = bot.send_message(chat_id, "⏳ Descargando video... Por favor espera.")
+                # Para videos pequeños, enviar normalmente
                 try:
-                    video_message = bot.send_video(
-                        chat_id, 
-                        self.video_url, 
-                        caption="🎥 Aquí tienes el video sin marca de agua.",
-                        supports_streaming=True,
-                        timeout=60
-                    )
+                    with open(video_temp_path, 'rb') as video_file:
+                        bot.send_video(
+                            chat_id, 
+                            video_file,
+                            caption="🎥 Aquí tienes el video sin marca de agua.",
+                            timeout=60
+                        )
                     bot.delete_message(chat_id, mensaje_descarga.message_id)
                 except Exception as e:
                     logger.error(f"Error al enviar video pequeño: {str(e)}")
@@ -217,17 +240,22 @@ class VideoContenido(IContenido):
                         mensaje_descarga.message_id
                     )
             
+            # Enviar el audio si existe
             if self.audio_url:
                 self.enviar_audio(chat_id)
-            else:
-                logger.info("No se encontró URL de audio para este contenido")
                 
         except Exception as e:
             logger.error(f"Error general al enviar video: {str(e)}")
             bot.send_message(
                 chat_id, 
-                f"❌ Error al procesar el video. Puedes intentar descargarlo directamente desde este enlace:\n{self.video_url}"
+                f"❌ Error al procesar el video: {str(e)}\n\n"
+                f"Puedes intentar descargarlo directamente desde este enlace:\n{self.video_url}"
             )
+        finally:
+            # Limpiar archivos temporales
+            if os.path.exists(video_temp_path):
+                os.remove(video_temp_path)
+                logger.info(f"Archivo temporal {video_temp_path} eliminado")
 
     def enviar_audio(self, chat_id: int):
         if not self.audio_url:
