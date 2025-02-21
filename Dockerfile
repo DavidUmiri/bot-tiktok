@@ -39,15 +39,17 @@ RUN mkdir -p temp
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Instalar Playwright browsers
+ENV PLAYWRIGHT_BROWSERS_PATH=/browsers
 RUN playwright install chromium
 RUN playwright install-deps
 
 # Variables de entorno
 ENV PORT=8080
 ENV HOST=0.0.0.0
+ENV PYTHONUNBUFFERED=1
 
 # Exponer el puerto
 EXPOSE 8080
 
 # Comando para ejecutar la aplicación
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "bot:app"] 
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--timeout", "0", "bot:app"] 

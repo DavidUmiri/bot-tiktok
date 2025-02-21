@@ -7,3 +7,4 @@ httpx==0.24.1
 Flask==2.0.1
 Werkzeug==2.0.1
 gunicorn==21.2.0
+nest-asyncio==1.5.8

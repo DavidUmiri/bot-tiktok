@@ -11,6 +11,7 @@ import time
 from telebot.handler_backends import State, StatesGroup
 from telebot.storage import StateMemoryStorage
 from flask import Flask, request
+import nest_asyncio  # Agregar este import
 
 # Modificar la configuración de logging para ser compatible con Railway
 logging.basicConfig(
@@ -43,6 +44,9 @@ bot.threaded = True  # Habilitar modo threaded para mejor rendimiento
 # Crear la aplicación Flask
 app = Flask(__name__)
 
+# Permitir nested event loops
+nest_asyncio.apply()
+
 class TikTokDownloader:
     def __init__(self):
         self.temp_dir = 'temp'
@@ -51,6 +55,16 @@ class TikTokDownloader:
         self._initialization_lock = asyncio.Lock()
         self._session_retry_count = 0
         self._max_retries = 3
+        self._loop = None
+
+    def get_event_loop(self):
+        """Get or create event loop"""
+        try:
+            return asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop
 
     async def _ensure_api_initialized(self):
         if self._api is None:
@@ -156,9 +170,8 @@ def manejar_tiktok(message):
     msg = bot.reply_to(message, "⏳ Descargando contenido... Por favor, espera un momento.")
     
     try:
-        # Crear un nuevo evento loop para la descarga asíncrona
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Usar el loop existente o crear uno nuevo
+        loop = downloader.get_event_loop()
         
         # Descargar el contenido con timeout
         try:
@@ -215,8 +228,6 @@ def manejar_tiktok(message):
             message.chat.id,
             msg.message_id
         )
-    finally:
-        loop.close()
 
 @bot.message_handler(func=lambda m: True)
 def manejar_otro(message):
