@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 
 # Configuración del bot
-TOKEN = os.getenv("BOT_TOKEN")  # Reemplaza con tu token de Telegram
+TOKEN = os.getenv("BOT_TOKEN")
 
 async def start(update, context):
     """Maneja el comando /start"""
