@@ -1,21 +1,20 @@
 import telebot
-import requests
 import os
-import uuid
 import logging
-from abc import ABC, abstractmethod
 from dotenv import load_dotenv
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-from moviepy.editor import VideoFileClip
-import math
-
-# ===================== Configuración y Dependencias =====================
+from TikTokApi import TikTokApi
+import asyncio
+from typing import List, Union
+import traceback
+import sys
+from telebot.handler_backends import State, StatesGroup
+from telebot.storage import StateMemoryStorage
 
 # Configurar logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    stream=sys.stdout
 )
 logger = logging.getLogger(__name__)
 
@@ -24,418 +23,238 @@ load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 
 if not TOKEN:
-    raise ValueError("No se encontró el token del bot. Asegúrate de crear un archivo .env con TELEGRAM_BOT_TOKEN=tu_token")
+    raise ValueError("No se encontró el token del bot. Asegúrate de configurar TELEGRAM_BOT_TOKEN")
 
-# Configurar reintentos para requests
-retry_strategy = Retry(
-    total=3,
-    backoff_factor=1,
-    status_forcelist=[429, 500, 502, 503, 504],
-)
-adapter = HTTPAdapter(max_retries=retry_strategy)
-http = requests.Session()
-http.mount("https://", adapter)
-http.mount("http://", adapter)
+# Instanciar el bot con manejo de estados y reintentos
+state_storage = StateMemoryStorage()
+bot = telebot.TeleBot(TOKEN, state_storage=state_storage)
+bot.threaded = True  # Habilitar modo threaded para mejor rendimiento
 
-# Instanciar el bot (Singleton)
-class BotSingleton:
-    __instance = None
+class TikTokDownloader:
+    def __init__(self):
+        self.temp_dir = 'temp'
+        os.makedirs(self.temp_dir, exist_ok=True)
+        self._api = None
+        self._initialization_lock = asyncio.Lock()
+        self._session_retry_count = 0
+        self._max_retries = 3
 
-    @staticmethod
-    def get_instance():
-        if BotSingleton.__instance is None:
-            BotSingleton.__instance = telebot.TeleBot(TOKEN)
-        return BotSingleton.__instance
-
-bot = BotSingleton.get_instance()
-
-# ===================== Contratos y Estrategias =====================
-
-class IContenido(ABC):
-    """
-    Interfaz para los tipos de contenido extraídos de TikTok.
-    """
-    @abstractmethod
-    def enviar_contenido(self, chat_id: int):
-        pass
-
-class IExtractor(ABC):
-    """
-    Interfaz para la extracción de contenido de TikTok.
-    """
-    @abstractmethod
-    def extraer(self, url: str) -> dict:
-        pass
-
-# ===================== Implementación del Extractor =====================
-
-class TikTokExtractor(IExtractor):
-    """
-    Clase responsable de conectar con la API de tikwm.com y extraer los datos.
-    """
-    API_ENDPOINT = "https://www.tikwm.com/api/"
-
-    def extraer(self, url: str) -> dict:
-        api_url = f"{self.API_ENDPOINT}?url={url}"
-        try:
-            # Aumentamos el timeout a 30 segundos
-            response = http.get(api_url, timeout=30)
-            response.raise_for_status()
-            data = response.json()
-            
-            if not data.get("data"):
-                raise ValueError("No se encontraron datos en la respuesta de la API.")
-            
-            video_data = data["data"]
-            logger.info(f"Datos recibidos de la API: {video_data.keys()}")
-            
-            # Procesar y asignar la URL del audio
-            audio_url = None
-            if "music" in video_data and video_data["music"]:
-                audio_url = video_data["music"]
-            elif "music_url" in video_data and video_data["music_url"]:
-                audio_url = video_data["music_url"]
-            elif "music_info" in video_data and video_data["music_info"].get("play_url"):
-                audio_url = video_data["music_info"]["play_url"]
-            
-            # Mejorada la detección de imágenes
-            images = []
-            if "images" in video_data and video_data.get("images"):
-                if isinstance(video_data["images"], list):
-                    images.extend(video_data["images"])
-                elif isinstance(video_data["images"], str):
-                    images.append(video_data["images"])
-                logger.info(f"Imágenes detectadas (formato images): {len(images)}")
-            
-            if "image_post_info" in video_data:
-                for img in video_data.get("image_post_info", []):
-                    if isinstance(img, dict):
-                        if "display_image" in img:
-                            url_list = img["display_image"].get("url_list", [])
-                            if url_list and isinstance(url_list, list) and url_list[0]:
-                                images.append(url_list[0])
-                        elif "images" in img:
-                            url_list = img["images"]
-                            if isinstance(url_list, list) and url_list:
-                                images.extend(url_list)
-                logger.info(f"Imágenes detectadas (formato image_post_info): {len(images)}")
-            
-            # Asegurarse de que play no esté presente en caso de imágenes
-            if images:
-                video_data["images"] = images
-                video_data.pop("play", None)  # Eliminar play si existe para forzar el modo imagen
-            
-            video_data["audio"] = audio_url
-            
-            logger.info(f"Audio URL encontrada: {audio_url}")
-            logger.info(f"Tipo de contenido final: {'imágenes' if video_data.get('images') else 'video'}")
-            logger.info(f"Total de imágenes encontradas: {len(video_data.get('images', []))}")
-            
-            return video_data
-            
-        except Exception as e:
-            logger.error(f"Error en extractor: {str(e)}")
-            raise Exception(f"Error al conectar con la API: {str(e)}")
-
-# ===================== Clases de Contenido =====================
-
-class VideoContenido(IContenido):
-    """
-    Clase para manejar contenido de tipo video.
-    """
-    def __init__(self, video_url: str, audio_url: str):
-        self.video_url = video_url
-        self.audio_url = audio_url
-        self.CHUNK_SIZE = 49 * 1024 * 1024  # 49MB para estar seguros
-
-    def dividir_video(self, video_path: str, duracion_total: float) -> list:
-        """Divide un video en partes más pequeñas"""
-        partes = []
-        video = VideoFileClip(video_path)
-        
-        # Calcular cuántas partes necesitamos
-        num_partes = math.ceil(os.path.getsize(video_path) / self.CHUNK_SIZE)
-        duracion_parte = duracion_total / num_partes
-        
-        logger.info(f"Dividiendo video en {num_partes} partes de {duracion_parte} segundos cada una")
-        
-        for i in range(num_partes):
-            tiempo_inicio = i * duracion_parte
-            tiempo_fin = min((i + 1) * duracion_parte, duracion_total)
-            
-            # Crear el nombre del archivo para esta parte
-            parte_path = os.path.join('temp', f'parte_{i+1}_{os.path.basename(video_path)}')
-            
-            # Extraer y guardar la parte del video
-            parte = video.subclip(tiempo_inicio, tiempo_fin)
-            parte.write_videofile(parte_path, codec='libx264')
-            partes.append(parte_path)
-            
-            logger.info(f"Parte {i+1} guardada en {parte_path}")
-        
-        video.close()
-        return partes
-
-    def enviar_contenido(self, chat_id: int):
-        try:
-            video_temp_path = os.path.join('temp', f'video_{str(uuid.uuid4())[:8]}.mp4')
-            os.makedirs('temp', exist_ok=True)
-            
-            # Descargar el video completo
-            mensaje_descarga = bot.send_message(chat_id, "⏳ Descargando video...")
-            
-            logger.info(f"Descargando video a: {video_temp_path}")
-            response = http.get(self.video_url, stream=True, timeout=60)
-            response.raise_for_status()
-            
-            with open(video_temp_path, 'wb') as video_file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        video_file.write(chunk)
-            
-            # Verificar el tamaño
-            if os.path.getsize(video_temp_path) > self.CHUNK_SIZE:
-                bot.edit_message_text("📦 Video grande detectado, dividiéndolo en partes...", chat_id, mensaje_descarga.message_id)
-                
-                # Obtener la duración del video
-                video = VideoFileClip(video_temp_path)
-                duracion_total = video.duration
-                video.close()
-                
-                # Dividir el video
-                partes = self.dividir_video(video_temp_path, duracion_total)
-                
-                # Enviar cada parte
-                for i, parte_path in enumerate(partes, 1):
-                    try:
-                        with open(parte_path, 'rb') as video_parte:
-                            bot.send_video(
-                                chat_id,
-                                video_parte,
-                                caption=f"🎥 Parte {i} de {len(partes)}",
-                                timeout=60
+    async def _ensure_api_initialized(self):
+        if self._api is None:
+            async with self._initialization_lock:
+                if self._api is None:
+                    while self._session_retry_count < self._max_retries:
+                        try:
+                            self._api = TikTokApi()
+                            await self._api.create_sessions(
+                                num_sessions=1,
+                                headless=True,
+                                browser_args=[
+                                    '--no-sandbox',
+                                    '--disable-setuid-sandbox',
+                                    '--disable-dev-shm-usage',
+                                    '--disable-gpu',
+                                    '--no-first-run',
+                                    '--no-zygote',
+                                    '--single-process'
+                                ]
                             )
-                        os.remove(parte_path)
-                    except Exception as e:
-                        logger.error(f"Error al enviar parte {i}: {str(e)}")
-                        continue
-                
-                bot.delete_message(chat_id, mensaje_descarga.message_id)
+                            break
+                        except Exception as e:
+                            self._session_retry_count += 1
+                            logger.error(f"Intento {self._session_retry_count} fallido: {str(e)}")
+                            if self._session_retry_count >= self._max_retries:
+                                raise
+                            await asyncio.sleep(5)  # Esperar antes de reintentar
+
+    async def download_content(self, url: str) -> List[str]:
+        """
+        Descarga cualquier tipo de contenido de TikTok (video, imágenes, audio)
+        Args:
+            url (str): URL del contenido de TikTok
+        Returns:
+            List[str]: Lista de rutas a los archivos descargados
+        """
+        try:
+            await self._ensure_api_initialized()
+            
+            # Obtener el ID del contenido de la URL
+            content_id = url.split('/')[-1].split('?')[0]
+            
+            # Obtener información del post
+            tiktok = await self._api.video(id=content_id)
+            
+            downloaded_files = []
+            
+            # Si el post tiene imágenes
+            if hasattr(tiktok, 'image_post') and tiktok.image_post:
+                for idx, image in enumerate(tiktok.image_urls):
+                    image_path = os.path.join(self.temp_dir, f'tiktok_{content_id}_image_{idx}.jpg')
+                    # Descargar imagen con reintentos
+                    for _ in range(3):
+                        try:
+                            image_bytes = await tiktok.image_bytes(image)
+                            with open(image_path, 'wb') as f:
+                                f.write(image_bytes)
+                            downloaded_files.append(image_path)
+                            break
+                        except Exception as e:
+                            logger.warning(f"Reintentando descarga de imagen: {str(e)}")
+                            await asyncio.sleep(1)
+            
+            # Si es un video
             else:
-                # Para videos pequeños, enviar normalmente
-                try:
-                    with open(video_temp_path, 'rb') as video_file:
-                        bot.send_video(
-                            chat_id, 
-                            video_file,
-                            caption="🎥 Aquí tienes el video sin marca de agua.",
-                            timeout=60
-                        )
-                    bot.delete_message(chat_id, mensaje_descarga.message_id)
-                except Exception as e:
-                    logger.error(f"Error al enviar video pequeño: {str(e)}")
-                    bot.edit_message_text(
-                        f"⚠️ No se pudo enviar el video.\n\nPuedes descargarlo desde aquí:\n{self.video_url}",
-                        chat_id,
-                        mensaje_descarga.message_id
-                    )
-            
-            # Enviar el audio si existe
-            if self.audio_url:
-                self.enviar_audio(chat_id)
-                
-        except Exception as e:
-            logger.error(f"Error general al enviar video: {str(e)}")
-            bot.send_message(
-                chat_id, 
-                f"❌ Error al procesar el video: {str(e)}\n\n"
-                f"Puedes intentar descargarlo directamente desde este enlace:\n{self.video_url}"
-            )
-        finally:
-            # Limpiar archivos temporales
-            if os.path.exists(video_temp_path):
-                os.remove(video_temp_path)
-                logger.info(f"Archivo temporal {video_temp_path} eliminado")
-
-    def enviar_audio(self, chat_id: int):
-        if not self.audio_url:
-            return
-            
-        audio_path = None
-        try:
-            logger.info(f"Intentando descargar audio desde: {self.audio_url}")
-            audio_response = http.get(self.audio_url, stream=True)
-            audio_response.raise_for_status()
-            
-            # Generar nombre único para el archivo
-            audio_filename = f"audio_{str(uuid.uuid4())[:8]}.mp3"
-            audio_path = os.path.join('temp', audio_filename)
-            
-            # Asegurar que el directorio temp existe
-            os.makedirs('temp', exist_ok=True)
-            
-            with open(audio_path, "wb") as f:
-                for chunk in audio_response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            logger.info(f"Audio descargado en: {audio_path}")
-            
-            with open(audio_path, "rb") as audio:
-                bot.send_audio(chat_id, audio, caption=f"🔊 Audio del video: {audio_filename}")
-        except Exception as e:
-            logger.error(f"Error con el audio: {str(e)}")
-            bot.send_message(chat_id, f"❌ Error con el audio: {str(e)}")
-        finally:
-            if audio_path and os.path.exists(audio_path):
-                os.remove(audio_path)
-                logger.info(f"Archivo temporal {audio_path} eliminado")
-
-class ImagenesContenido(IContenido):
-    """
-    Clase para manejar contenido de tipo imágenes.
-    """
-    def __init__(self, imagenes_urls: list, audio_url: str):
-        if isinstance(imagenes_urls, str):
-            imagenes_urls = [imagenes_urls]
-        self.imagenes_urls = imagenes_urls if isinstance(imagenes_urls, list) else []
-        self.audio_url = audio_url
-
-    def enviar_contenido(self, chat_id: int):
-        try:
-            if not self.imagenes_urls:
-                bot.send_message(chat_id, "❌ No se encontraron imágenes en este contenido.")
-                return
-
-            logger.info(f"Intentando enviar {len(self.imagenes_urls)} imágenes")
-            media_group = []
-            
-            for img_url in self.imagenes_urls:
-                logger.info(f"Procesando imagen: {img_url}")
-                # Verificar que la URL no sea None o vacía
-                if img_url and isinstance(img_url, str) and img_url.strip():
+                video_path = os.path.join(self.temp_dir, f'tiktok_{content_id}.mp4')
+                # Descargar video con reintentos
+                for _ in range(3):
                     try:
-                        media = telebot.types.InputMediaPhoto(img_url)
-                        media_group.append(media)
+                        video_bytes = await tiktok.bytes()
+                        with open(video_path, 'wb') as f:
+                            f.write(video_bytes)
+                        downloaded_files.append(video_path)
+                        break
                     except Exception as e:
-                        logger.error(f"Error al procesar imagen {img_url}: {str(e)}")
+                        logger.warning(f"Reintentando descarga de video: {str(e)}")
+                        await asyncio.sleep(1)
+                
+                # Si el video tiene audio separado
+                if hasattr(tiktok, 'music'):
+                    try:
+                        audio_path = os.path.join(self.temp_dir, f'tiktok_{content_id}_audio.mp3')
+                        audio_bytes = await tiktok.music.bytes()
+                        with open(audio_path, 'wb') as f:
+                            f.write(audio_bytes)
+                        downloaded_files.append(audio_path)
+                    except Exception as e:
+                        logger.warning(f"No se pudo descargar el audio: {str(e)}")
             
-            if media_group:
-                bot.send_message(chat_id, "📸 Enviando imágenes...")
-                # Enviar imágenes en grupos de 10 (límite de Telegram)
-                for i in range(0, len(media_group), 10):
-                    group = media_group[i:i+10]
-                    bot.send_media_group(chat_id, group)
-                    
-                if self.audio_url:
-                    self.enviar_audio(chat_id)
-            else:
-                bot.send_message(chat_id, "❌ No se pudieron procesar las imágenes.")
+            if not downloaded_files:
+                raise Exception("No se pudo descargar ningún contenido después de varios intentos")
+                
+            return downloaded_files
+            
         except Exception as e:
-            logger.error(f"Error al enviar imágenes: {str(e)}")
-            bot.send_message(chat_id, f"❌ Error al enviar las imágenes: {str(e)}")
+            logger.error(f"Error al descargar el contenido: {str(e)}\n{traceback.format_exc()}")
+            raise
 
-    def enviar_audio(self, chat_id: int):
-        if not self.audio_url:
-            return
-            
-        audio_path = None
+    async def cleanup(self):
+        """Limpia recursos cuando se cierra la aplicación"""
+        if self._api:
+            try:
+                await self._api.close()
+            except:
+                pass
+        # Limpiar archivos temporales
         try:
-            logger.info(f"Intentando descargar audio desde: {self.audio_url}")
-            audio_response = http.get(self.audio_url, stream=True)
-            audio_response.raise_for_status()
-            
-            # Generar nombre único para el archivo
-            audio_filename = f"audio_{str(uuid.uuid4())[:8]}.mp3"
-            audio_path = os.path.join('temp', audio_filename)
-            
-            # Asegurar que el directorio temp existe
-            os.makedirs('temp', exist_ok=True)
-            
-            with open(audio_path, "wb") as f:
-                for chunk in audio_response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-            
-            logger.info(f"Audio descargado en: {audio_path}")
-            
-            with open(audio_path, "rb") as audio:
-                bot.send_audio(chat_id, audio, caption="🔊 Audio de la publicación")
-        except Exception as e:
-            logger.error(f"Error con el audio: {str(e)}")
-            bot.send_message(chat_id, f"❌ Error con el audio: {str(e)}")
-        finally:
-            if audio_path and os.path.exists(audio_path):
-                os.remove(audio_path)
-                logger.info(f"Archivo temporal {audio_path} eliminado")
+            for file in os.listdir(self.temp_dir):
+                os.remove(os.path.join(self.temp_dir, file))
+        except:
+            pass
 
-# ===================== Factory para Crear el Contenido =====================
-
-class ContenidoFactory:
-    """
-    Factory para crear instancias de IContenido según el tipo detectado.
-    """
-    @staticmethod
-    def crear_contenido(data: dict) -> IContenido:
-        audio_url = data.get("audio", None)
-        logger.info(f"Creando contenido. Tiene imágenes: {'images' in data}, Tiene video: {'play' in data}")
-        
-        # Primero verificar si hay imágenes y son válidas
-        if "images" in data and data["images"] and isinstance(data["images"], (list, str)):
-            logger.info("Creando contenido de tipo imagen")
-            return ImagenesContenido(imagenes_urls=data["images"], audio_url=audio_url)
-        # Si no hay imágenes válidas, intentar con video
-        elif "play" in data and data["play"]:
-            logger.info("Creando contenido de tipo video")
-            return VideoContenido(video_url=data["play"], audio_url=audio_url)
-        else:
-            raise ValueError("El contenido no es reconocible como video o imágenes.")
-
-# ===================== Controlador del Bot =====================
-
-class TikTokBotController:
-    def __init__(self, extractor: IExtractor, factory: ContenidoFactory):
-        self.extractor = extractor
-        self.factory = factory
-
-    def procesar_enlace(self, chat_id: int, enlace: str):
-        bot.send_message(chat_id, "⏳ Procesando tu enlace...")
-        try:
-            data = self.extractor.extraer(enlace)
-            contenido = self.factory.crear_contenido(data)
-            contenido.enviar_contenido(chat_id)
-        except Exception as e:
-            bot.send_message(chat_id, f"❌ Error al procesar el enlace: {e}")
-
-# ===================== Inicialización del Bot y Handlers =====================
-
-extractor = TikTokExtractor()
-factory = ContenidoFactory()
-controller = TikTokBotController(extractor, factory)
+downloader = TikTokDownloader()
 
 @bot.message_handler(commands=['start', 'help'])
 def enviar_bienvenida(message):
-    bot.reply_to(message, "¡Hola! Envíame el enlace de un TikTok y te enviaré su contenido (video/imágenes) junto con el audio.")
+    bot.reply_to(message, 
+                "¡Hola! Envíame cualquier enlace de TikTok y te enviaré su contenido sin marca de agua.\n"
+                "Puedo descargar:\n"
+                "- Videos\n"
+                "- Fotos\n"
+                "- Audio\n"
+                "Solo envía el enlace y yo me encargo del resto.")
 
 @bot.message_handler(func=lambda m: 'tiktok.com' in m.text.lower())
 def manejar_tiktok(message):
     enlace = message.text.strip()
-    controller.procesar_enlace(message.chat.id, enlace)
+    msg = bot.reply_to(message, "⏳ Descargando contenido... Por favor, espera un momento.")
+    
+    try:
+        # Crear un nuevo evento loop para la descarga asíncrona
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Descargar el contenido con timeout
+        try:
+            archivos = loop.run_until_complete(asyncio.wait_for(
+                downloader.download_content(enlace),
+                timeout=300  # 5 minutos máximo
+            ))
+        except asyncio.TimeoutError:
+            bot.edit_message_text(
+                "❌ La descarga está tardando demasiado. Por favor, intenta de nuevo.",
+                message.chat.id,
+                msg.message_id
+            )
+            return
+        
+        if not archivos:
+            bot.edit_message_text(
+                "❌ No se encontró ningún contenido para descargar.",
+                message.chat.id,
+                msg.message_id
+            )
+            return
+        
+        # Enviar cada archivo descargado
+        for archivo in archivos:
+            try:
+                if archivo.endswith(('.mp4', '.jpg')):
+                    with open(archivo, 'rb') as f:
+                        if archivo.endswith('.mp4'):
+                            bot.send_video(message.chat.id, f, timeout=60)
+                        else:
+                            bot.send_photo(message.chat.id, f, timeout=60)
+                elif archivo.endswith('.mp3'):
+                    with open(archivo, 'rb') as f:
+                        bot.send_audio(message.chat.id, f, timeout=60)
+            except Exception as e:
+                logger.error(f"Error enviando archivo {archivo}: {str(e)}")
+                continue
+            finally:
+                # Eliminar el archivo temporal
+                try:
+                    os.remove(archivo)
+                except Exception as e:
+                    logger.warning(f"No se pudo eliminar el archivo temporal {archivo}: {str(e)}")
+        
+        bot.edit_message_text(
+            "✅ ¡Contenido descargado y enviado con éxito!",
+            message.chat.id,
+            msg.message_id
+        )
+        
+    except Exception as e:
+        error_msg = f"❌ Error al procesar el contenido: {str(e)}"
+        logger.error(error_msg)
+        bot.edit_message_text(
+            error_msg,
+            message.chat.id,
+            msg.message_id
+        )
+    finally:
+        loop.close()
 
 @bot.message_handler(func=lambda m: True)
 def manejar_otro(message):
     bot.send_message(message.chat.id, "Por favor, envía un enlace de TikTok.")
 
-# ===================== Punto de Entrada =====================
+def cleanup_resources():
+    """Limpia recursos al cerrar la aplicación"""
+    try:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(downloader.cleanup())
+    except:
+        pass
 
-def main():
-    logger.info("Bot iniciado...")
-    while True:
-        try:
-            bot.polling(none_stop=True)
-        except Exception as e:
-            logger.error(f"Error en el bot: {str(e)}")
-            continue
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    logger.info("Iniciando bot...")
+    try:
+        # Configurar reconexión automática
+        while True:
+            try:
+                bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            except Exception as e:
+                logger.error(f"Error en el polling: {str(e)}")
+                continue
+    finally:
+        cleanup_resources()

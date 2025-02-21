@@ -1,64 +1,75 @@
-# Bot de TikTok para Telegram
+# TikTok Downloader Bot
 
-Este bot de Telegram permite descargar videos e imágenes de TikTok sin marca de agua, además de extraer el audio de las publicaciones.
+Bot de Telegram que permite descargar contenido de TikTok sin marca de agua.
 
 ## Características
 
-- 🎥 Descarga videos de TikTok sin marca de agua
-- 🖼️ Extrae imágenes de publicaciones de TikTok
-- 🔊 Extrae y envía el audio de las publicaciones
-- ♻️ Sistema de reintentos automáticos para mayor estabilidad
-- 🔒 Manejo seguro de tokens mediante variables de entorno
+- Descarga videos de TikTok sin marca de agua
+- Descarga imágenes de publicaciones
+- Extrae audio de videos
+- Manejo automático de diferentes tipos de contenido
 
 ## Requisitos
 
-- Python 3.x
-- Las siguientes bibliotecas de Python (instalables via pip):
-  - python-telegram-bot
-  - requests
-  - python-dotenv
+- Python 3.12+
+- Token de bot de Telegram
+- Las dependencias listadas en `requirements.txt`
 
-## Configuración
+## Configuración Local
 
-1. Crea un archivo `.env` en la raíz del proyecto con la siguiente variable:
-   ```
-   TELEGRAM_BOT_TOKEN=tu_token_de_telegram
-   ```
+1. Crear un archivo `.env` en el directorio raíz con:
+```
+TELEGRAM_BOT_TOKEN=tu_token_aqui
+```
 
-2. Instala las dependencias:
-   ```
-   pip install -r requirements.txt
-   ```
+2. Instalar dependencias:
+```bash
+pip install -r requirements.txt
+python -m playwright install
+```
 
-## Uso
+3. Ejecutar el bot:
+```bash
+python bot.py
+```
 
-1. Inicia el bot con:
-   ```
-   python bot.py
-   ```
+## Despliegue en Railway
 
-2. En Telegram:
-   - Envía `/start` o `/help` para ver las instrucciones
-   - Envía cualquier enlace de TikTok y el bot responderá con el contenido sin marca de agua
+1. Fork o clona este repositorio
+2. Crea una cuenta en Railway.app
+3. Crea un nuevo proyecto en Railway seleccionando el repositorio
+4. Configura las variables de entorno en Railway:
+   - `TELEGRAM_BOT_TOKEN`: Tu token de bot de Telegram
+   - `PYTHON_VERSION`: 3.12.x
 
-## Estructura del Proyecto
+5. Railway detectará automáticamente que es una aplicación Python y la desplegará
 
-El proyecto utiliza un diseño orientado a objetos con:
-- Patrón Singleton para la instancia del bot
-- Patrón Factory para la creación de contenido
-- Interfaces abstractas para extensibilidad
-- Sistema de logging para monitoreo
+### Notas para el despliegue en Railway:
+- El bot se iniciará automáticamente después del despliegue
+- Railway reinstalará las dependencias automáticamente
+- El sistema de archivos es efímero, por lo que los archivos temporales se limpiarán automáticamente
+- Los logs están disponibles en el dashboard de Railway
 
-## Despliegue
+## Despliegue en Heroku
 
-El proyecto incluye archivos necesarios para despliegue en Heroku:
-- Procfile
-- requirements.txt
-- runtime.txt
+El bot está configurado para ser desplegado en Heroku:
 
-## Soporte
+1. Asegúrate de tener el CLI de Heroku instalado
+2. Crear una nueva aplicación en Heroku
+3. Configurar las variables de entorno en Heroku:
+   - TELEGRAM_BOT_TOKEN
+4. Desplegar usando Git:
+```bash
+git init
+git add .
+git commit -m "Initial commit"
+heroku git:remote -a tu-app-name
+git push heroku main
+```
 
-El bot puede manejar:
-- Videos de TikTok
-- Publicaciones con imágenes
-- Extracción de audio
+## Notas importantes
+
+- El bot utiliza una carpeta temporal `temp/` para almacenar archivos durante la descarga
+- Los archivos se eliminan automáticamente después de ser enviados
+- Se requiere una conexión estable a internet para el funcionamiento correcto
+- El bot está optimizado para funcionar en Railway con recursos limitados
