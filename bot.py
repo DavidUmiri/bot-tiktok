@@ -88,7 +88,7 @@ class TikTokDownloader:
             content_id = url.split('/')[-1].split('?')[0]
             
             # Obtener información del post usando la nueva API
-            video = await self._api.video(id=content_id)
+            video = self._api.video(id=content_id)
             downloaded_files = []
             
             # Si es un video
@@ -96,7 +96,7 @@ class TikTokDownloader:
             # Descargar video con reintentos
             for _ in range(3):
                 try:
-                    video_data = await video.bytes()
+                    video_data = video.bytes()
                     with open(video_path, 'wb') as f:
                         f.write(video_data)
                     downloaded_files.append(video_path)
@@ -108,9 +108,9 @@ class TikTokDownloader:
             # Si el video tiene música
             try:
                 music = video.music
-                if music and music.play_url:
+                if music and hasattr(music, 'play_url'):
                     audio_path = os.path.join(self.temp_dir, f'tiktok_{content_id}_audio.mp3')
-                    audio_data = await music.bytes()
+                    audio_data = music.bytes()
                     with open(audio_path, 'wb') as f:
                         f.write(audio_data)
                     downloaded_files.append(audio_path)
@@ -263,8 +263,10 @@ def start_bot():
         if os.getenv('RAILWAY_STATIC_URL'):
             # Modo producción - usar webhook
             init_webhook()
-            logger.info(f"Starting Flask server on port {PORT}")
-            app.run(host='0.0.0.0', port=PORT)
+            logger.info(f"Starting server on port {PORT}")
+            # Usar gunicorn en lugar del servidor de desarrollo
+            from waitress import serve
+            serve(app, host='0.0.0.0', port=PORT)
         else:
             # Modo local - usar polling
             bot.remove_webhook()
