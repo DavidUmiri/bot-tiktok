@@ -57,15 +57,6 @@ class TikTokDownloader:
         self._max_retries = 3
         self._loop = None
 
-    def get_event_loop(self):
-        """Get or create event loop"""
-        try:
-            return asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            return loop
-
     async def _ensure_api_initialized(self):
         if self._api is None:
             async with self._initialization_lock:
@@ -73,17 +64,14 @@ class TikTokDownloader:
                     while self._session_retry_count < self._max_retries:
                         try:
                             self._api = TikTokApi()
-                            await self._api.create_sessions(
-                                num_sessions=1,
-                                headless=True
-                            )
+                            # La nueva versión no necesita create_sessions
                             break
                         except Exception as e:
                             self._session_retry_count += 1
                             logger.error(f"Intento {self._session_retry_count} fallido: {str(e)}")
                             if self._session_retry_count >= self._max_retries:
                                 raise
-                            await asyncio.sleep(5)  # Esperar antes de reintentar
+                            await asyncio.sleep(5)
 
     async def download_content(self, url: str) -> List[str]:
         """
@@ -99,8 +87,8 @@ class TikTokDownloader:
             # Obtener el ID del contenido de la URL
             content_id = url.split('/')[-1].split('?')[0]
             
-            # Obtener información del post
-            video_data = await self._api.video(id=content_id)
+            # Obtener información del post usando la nueva API
+            video = await self._api.video(id=content_id)
             downloaded_files = []
             
             # Si es un video
@@ -108,9 +96,9 @@ class TikTokDownloader:
             # Descargar video con reintentos
             for _ in range(3):
                 try:
-                    video_bytes = await video_data.bytes()
+                    video_data = await video.bytes()
                     with open(video_path, 'wb') as f:
-                        f.write(video_bytes)
+                        f.write(video_data)
                     downloaded_files.append(video_path)
                     break
                 except Exception as e:
@@ -118,17 +106,16 @@ class TikTokDownloader:
                     await asyncio.sleep(1)
             
             # Si el video tiene música
-            if hasattr(video_data, 'music') and video_data.music:
-                try:
-                    music_data = video_data.music
-                    if hasattr(music_data, 'play_url') and music_data.play_url:
-                        audio_path = os.path.join(self.temp_dir, f'tiktok_{content_id}_audio.mp3')
-                        audio_bytes = await music_data.bytes()
-                        with open(audio_path, 'wb') as f:
-                            f.write(audio_bytes)
-                        downloaded_files.append(audio_path)
-                except Exception as e:
-                    logger.warning(f"No se pudo descargar el audio: {str(e)}")
+            try:
+                music = video.music
+                if music and music.play_url:
+                    audio_path = os.path.join(self.temp_dir, f'tiktok_{content_id}_audio.mp3')
+                    audio_data = await music.bytes()
+                    with open(audio_path, 'wb') as f:
+                        f.write(audio_data)
+                    downloaded_files.append(audio_path)
+            except Exception as e:
+                logger.warning(f"No se pudo descargar el audio: {str(e)}")
             
             if not downloaded_files:
                 raise Exception("No se pudo descargar ningún contenido después de varios intentos")
