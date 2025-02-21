@@ -11,17 +11,25 @@ import time
 from telebot.handler_backends import State, StatesGroup
 from telebot.storage import StateMemoryStorage
 
-# Configurar logging
+# Modificar la configuración de logging para ser compatible con Railway
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
-    stream=sys.stdout
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('bot.log', mode='a')
+    ]
 )
 logger = logging.getLogger(__name__)
 
 # Cargar variables de entorno
 load_dotenv()
 TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+
+# Modificar la configuración para Railway
+PORT = int(os.getenv('PORT', 8080))
+WEBHOOK_URL = os.getenv('WEBHOOK_URL')
+WEBHOOK_HOST = os.getenv('WEBHOOK_HOST', '0.0.0.0')
 
 if not TOKEN:
     raise ValueError("No se encontró el token del bot. Asegúrate de configurar TELEGRAM_BOT_TOKEN")
@@ -218,28 +226,61 @@ def cleanup_resources():
     except:
         pass
 
+def start_bot():
+    try:
+        logger.info("Starting bot...")
+        bot.remove_webhook()
+        time.sleep(0.2)
+        
+        # Configurar webhook si estamos en producción (Railway)
+        if os.getenv('RAILWAY_STATIC_URL'):
+            logger.info(f"Setting webhook for {WEBHOOK_URL}")
+            bot.set_webhook(url=f'{WEBHOOK_URL}/{TOKEN}')
+            # Iniciar servidor web para webhooks
+            from flask import Flask, request
+            app = Flask(__name__)
+            
+            @app.route('/' + TOKEN, methods=['POST'])
+            def webhook():
+                if request.headers.get('content-type') == 'application/json':
+                    json_string = request.get_data().decode('utf-8')
+                    update = telebot.types.Update.de_json(json_string)
+                    bot.process_new_updates([update])
+                    return ''
+                else:
+                    return 'error', 403
+                    
+            app.run(host=WEBHOOK_HOST, port=PORT)
+        else:
+            # Modo local - usar polling
+            logger.info("Starting polling...")
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            
+    except Exception as e:
+        logger.error(f"Bot initialization error: {e}")
+        raise
+
 if __name__ == "__main__":
-    logger.info("Iniciando bot...")
+    logger.info("Initializing bot...")
     retry_count = 0
     max_retries = 5
     
     while True:
         try:
             if retry_count > 0:
-                logger.info(f"Reintentando conexión ({retry_count}/{max_retries})...")
-                time.sleep(5)  # Esperar antes de reintentar
+                logger.info(f"Retrying connection ({retry_count}/{max_retries})...")
+                time.sleep(min(30, 5 * retry_count))  # Backoff exponencial
             
-            # Inicializar Playwright antes de comenzar
-            logger.info("Iniciando polling...")
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            start_bot()
             
         except Exception as e:
-            logger.error(f"Error en el polling: {str(e)}")
+            logger.error(f"Polling error: {str(e)}")
             retry_count += 1
             
             if retry_count >= max_retries:
-                logger.error("Se alcanzó el número máximo de reintentos. Reiniciando el proceso...")
-                retry_count = 0
+                logger.error("Maximum retries reached. Restarting process...")
+                cleanup_resources()
+                sys.exit(1)  # Railway reiniciará el proceso
             
             continue
         finally:
