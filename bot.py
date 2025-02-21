@@ -49,16 +49,7 @@ class TikTokDownloader:
                             self._api = TikTokApi()
                             await self._api.create_sessions(
                                 num_sessions=1,
-                                headless=True,
-                                browser_args=[
-                                    '--no-sandbox',
-                                    '--disable-setuid-sandbox',
-                                    '--disable-dev-shm-usage',
-                                    '--disable-gpu',
-                                    '--no-first-run',
-                                    '--no-zygote',
-                                    '--single-process'
-                                ]
+                                headless=True
                             )
                             break
                         except Exception as e:
@@ -83,51 +74,35 @@ class TikTokDownloader:
             content_id = url.split('/')[-1].split('?')[0]
             
             # Obtener información del post
-            tiktok = await self._api.video(id=content_id)
-            
+            video_data = await self._api.video(id=content_id)
             downloaded_files = []
             
-            # Si el post tiene imágenes
-            if hasattr(tiktok, 'image_post') and tiktok.image_post:
-                for idx, image in enumerate(tiktok.image_urls):
-                    image_path = os.path.join(self.temp_dir, f'tiktok_{content_id}_image_{idx}.jpg')
-                    # Descargar imagen con reintentos
-                    for _ in range(3):
-                        try:
-                            image_bytes = await tiktok.image_bytes(image)
-                            with open(image_path, 'wb') as f:
-                                f.write(image_bytes)
-                            downloaded_files.append(image_path)
-                            break
-                        except Exception as e:
-                            logger.warning(f"Reintentando descarga de imagen: {str(e)}")
-                            await asyncio.sleep(1)
-            
             # Si es un video
-            else:
-                video_path = os.path.join(self.temp_dir, f'tiktok_{content_id}.mp4')
-                # Descargar video con reintentos
-                for _ in range(3):
-                    try:
-                        video_bytes = await tiktok.bytes()
-                        with open(video_path, 'wb') as f:
-                            f.write(video_bytes)
-                        downloaded_files.append(video_path)
-                        break
-                    except Exception as e:
-                        logger.warning(f"Reintentando descarga de video: {str(e)}")
-                        await asyncio.sleep(1)
-                
-                # Si el video tiene audio separado
-                if hasattr(tiktok, 'music'):
-                    try:
+            video_path = os.path.join(self.temp_dir, f'tiktok_{content_id}.mp4')
+            # Descargar video con reintentos
+            for _ in range(3):
+                try:
+                    video_bytes = await video_data.bytes()
+                    with open(video_path, 'wb') as f:
+                        f.write(video_bytes)
+                    downloaded_files.append(video_path)
+                    break
+                except Exception as e:
+                    logger.warning(f"Reintentando descarga de video: {str(e)}")
+                    await asyncio.sleep(1)
+            
+            # Si el video tiene música
+            if hasattr(video_data, 'music') and video_data.music:
+                try:
+                    music_data = video_data.music
+                    if hasattr(music_data, 'play_url') and music_data.play_url:
                         audio_path = os.path.join(self.temp_dir, f'tiktok_{content_id}_audio.mp3')
-                        audio_bytes = await tiktok.music.bytes()
+                        audio_bytes = await music_data.bytes()
                         with open(audio_path, 'wb') as f:
                             f.write(audio_bytes)
                         downloaded_files.append(audio_path)
-                    except Exception as e:
-                        logger.warning(f"No se pudo descargar el audio: {str(e)}")
+                except Exception as e:
+                    logger.warning(f"No se pudo descargar el audio: {str(e)}")
             
             if not downloaded_files:
                 raise Exception("No se pudo descargar ningún contenido después de varios intentos")
@@ -160,7 +135,6 @@ def enviar_bienvenida(message):
                 "¡Hola! Envíame cualquier enlace de TikTok y te enviaré su contenido sin marca de agua.\n"
                 "Puedo descargar:\n"
                 "- Videos\n"
-                "- Fotos\n"
                 "- Audio\n"
                 "Solo envía el enlace y yo me encargo del resto.")
 
@@ -199,12 +173,9 @@ def manejar_tiktok(message):
         # Enviar cada archivo descargado
         for archivo in archivos:
             try:
-                if archivo.endswith(('.mp4', '.jpg')):
+                if archivo.endswith('.mp4'):
                     with open(archivo, 'rb') as f:
-                        if archivo.endswith('.mp4'):
-                            bot.send_video(message.chat.id, f, timeout=60)
-                        else:
-                            bot.send_photo(message.chat.id, f, timeout=60)
+                        bot.send_video(message.chat.id, f, timeout=60)
                 elif archivo.endswith('.mp3'):
                     with open(archivo, 'rb') as f:
                         bot.send_audio(message.chat.id, f, timeout=60)
@@ -259,9 +230,6 @@ if __name__ == "__main__":
                 time.sleep(5)  # Esperar antes de reintentar
             
             # Inicializar Playwright antes de comenzar
-            logger.info("Inicializando Playwright...")
-            os.system("playwright install --with-deps chromium")
-            
             logger.info("Iniciando polling...")
             bot.infinity_polling(timeout=60, long_polling_timeout=60)
             
