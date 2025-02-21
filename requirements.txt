@@ -4,4 +4,6 @@ TikTokApi==5.2.2
 playwright==1.41.2
 asyncio==3.4.3
 httpx==0.24.1
-flask==2.0.1
+Flask==2.0.1
+Werkzeug==2.0.1
+gunicorn==21.2.0

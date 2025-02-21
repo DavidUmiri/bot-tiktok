@@ -10,6 +10,7 @@ import sys
 import time
 from telebot.handler_backends import State, StatesGroup
 from telebot.storage import StateMemoryStorage
+from flask import Flask, request
 
 # Modificar la configuración de logging para ser compatible con Railway
 logging.basicConfig(
@@ -38,6 +39,9 @@ if not TOKEN:
 state_storage = StateMemoryStorage()
 bot = telebot.TeleBot(TOKEN, state_storage=state_storage)
 bot.threaded = True  # Habilitar modo threaded para mejor rendimiento
+
+# Crear la aplicación Flask
+app = Flask(__name__)
 
 class TikTokDownloader:
     def __init__(self):
@@ -221,38 +225,48 @@ def manejar_otro(message):
 def cleanup_resources():
     """Limpia recursos al cerrar la aplicación"""
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         loop.run_until_complete(downloader.cleanup())
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Error during cleanup: {e}")
+
+def init_webhook():
+    """Inicializa el webhook del bot"""
+    if os.getenv('RAILWAY_STATIC_URL'):
+        webhook_base = os.getenv('RAILWAY_STATIC_URL')
+        webhook_url = f"https://{webhook_base}/{TOKEN}"
+        logger.info(f"Setting webhook for {webhook_url}")
+        bot.remove_webhook()
+        time.sleep(0.2)
+        bot.set_webhook(url=webhook_url)
+
+@app.route('/' + TOKEN, methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return 'ok'
+    return 'error', 403
+
+@app.route('/')
+def health():
+    return 'Bot is running'
 
 def start_bot():
     try:
         logger.info("Starting bot...")
-        bot.remove_webhook()
-        time.sleep(0.2)
         
-        # Configurar webhook si estamos en producción (Railway)
         if os.getenv('RAILWAY_STATIC_URL'):
-            logger.info(f"Setting webhook for {WEBHOOK_URL}")
-            bot.set_webhook(url=f'{WEBHOOK_URL}/{TOKEN}')
-            # Iniciar servidor web para webhooks
-            from flask import Flask, request
-            app = Flask(__name__)
-            
-            @app.route('/' + TOKEN, methods=['POST'])
-            def webhook():
-                if request.headers.get('content-type') == 'application/json':
-                    json_string = request.get_data().decode('utf-8')
-                    update = telebot.types.Update.de_json(json_string)
-                    bot.process_new_updates([update])
-                    return ''
-                else:
-                    return 'error', 403
-                    
-            app.run(host=WEBHOOK_HOST, port=PORT)
+            # Modo producción - usar webhook
+            init_webhook()
+            logger.info(f"Starting Flask server on port {PORT}")
+            app.run(host='0.0.0.0', port=PORT)
         else:
             # Modo local - usar polling
+            bot.remove_webhook()
+            time.sleep(0.2)
             logger.info("Starting polling...")
             bot.infinity_polling(timeout=60, long_polling_timeout=60)
             
@@ -261,6 +275,7 @@ def start_bot():
         raise
 
 if __name__ == "__main__":
+    # Si se ejecuta directamente, iniciar en modo polling
     logger.info("Initializing bot...")
     retry_count = 0
     max_retries = 5
@@ -269,7 +284,7 @@ if __name__ == "__main__":
         try:
             if retry_count > 0:
                 logger.info(f"Retrying connection ({retry_count}/{max_retries})...")
-                time.sleep(min(30, 5 * retry_count))  # Backoff exponencial
+                time.sleep(min(30, 5 * retry_count))
             
             start_bot()
             
@@ -280,8 +295,11 @@ if __name__ == "__main__":
             if retry_count >= max_retries:
                 logger.error("Maximum retries reached. Restarting process...")
                 cleanup_resources()
-                sys.exit(1)  # Railway reiniciará el proceso
+                sys.exit(1)
             
             continue
         finally:
             cleanup_resources()
+else:
+    # Si se importa (por gunicorn), inicializar webhook
+    init_webhook()
