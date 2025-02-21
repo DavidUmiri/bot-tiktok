@@ -7,6 +7,7 @@ import asyncio
 from typing import List, Union
 import traceback
 import sys
+import time
 from telebot.handler_backends import State, StatesGroup
 from telebot.storage import StateMemoryStorage
 
@@ -248,13 +249,30 @@ def cleanup_resources():
 
 if __name__ == "__main__":
     logger.info("Iniciando bot...")
-    try:
-        # Configurar reconexión automática
-        while True:
-            try:
-                bot.infinity_polling(timeout=60, long_polling_timeout=60)
-            except Exception as e:
-                logger.error(f"Error en el polling: {str(e)}")
-                continue
-    finally:
-        cleanup_resources()
+    retry_count = 0
+    max_retries = 5
+    
+    while True:
+        try:
+            if retry_count > 0:
+                logger.info(f"Reintentando conexión ({retry_count}/{max_retries})...")
+                time.sleep(5)  # Esperar antes de reintentar
+            
+            # Inicializar Playwright antes de comenzar
+            logger.info("Inicializando Playwright...")
+            os.system("playwright install --with-deps chromium")
+            
+            logger.info("Iniciando polling...")
+            bot.infinity_polling(timeout=60, long_polling_timeout=60)
+            
+        except Exception as e:
+            logger.error(f"Error en el polling: {str(e)}")
+            retry_count += 1
+            
+            if retry_count >= max_retries:
+                logger.error("Se alcanzó el número máximo de reintentos. Reiniciando el proceso...")
+                retry_count = 0
+            
+            continue
+        finally:
+            cleanup_resources()
