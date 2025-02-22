@@ -1,120 +1,178 @@
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
-import requests
-import re
-import yt_dlp
+from typing import Optional, Union
+from pathlib import Path
+from contextlib import contextmanager
 import os
+import re
 import logging
-from telegram.error import NetworkError
+import requests
+import yt_dlp
+import uuid  # Importar uuid para generar nombres aleatorios
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram import Update, InputMediaPhoto
+from telegram.ext import ContextTypes
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.common.exceptions import NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
-# Configuración de logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
 # Configuración del bot
 TOKEN = os.getenv("BOT_TOKEN")
-# Función para obtener imágenes de TikTok usando Selenium
-async def get_images_from_tiktok(url):
+if not TOKEN:
+    raise ValueError("BOT_TOKEN no está configurado en las variables de entorno")
+DOWNLOADS_DIR = Path("downloads")
+TIKTOK_URL_PATTERN = r'https?://(?:www\.)?(?:vm\.)?tiktok\.com/'
+# Configuración de logs
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
+@contextmanager
+def cleanup_file(file_path: Union[str, Path]):
+    try:
+        yield
+    finally:
+        try:
+            os.remove(file_path)
+        except OSError:
+            logger.warning(f"No se pudo eliminar el archivo: {file_path}")
+async def get_tipo_contenido(url: str) -> str:
+    """
+    Determina el tipo de contenido basándose en la URL final.
+    Aquí, si la URL contiene /music/ la tratamos como audio.
+    """
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+    }
+    response = requests.get(url, headers=headers, allow_redirects=True)
+    final_url = response.url
+    if re.search(r'/music/', final_url):
+        return "audio"
+    if re.search(r'/video/', final_url):
+        return "video"
+    if re.search(r'/photo/|/share/', final_url):
+        return "fotos"
+    return "desconocido"
+async def descargar_video(update: Update, url: str):
+    """Descarga y envía un video (con audio) usando yt-dlp."""
+    await update.message.reply_text("Descargando video...")
+    ydl_opts = {
+        'format': 'bestaudio[ext=m4a]/bestaudio/best[ext=mp4]/best',
+        'outtmpl': str(DOWNLOADS_DIR / '%(id)s.%(ext)s'),
+        'quiet': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        file_path = ydl.prepare_filename(info)
+        if file_path.endswith(('.mp4', '.webm', '.m4a')):
+            with cleanup_file(file_path):
+                if file_path.endswith(('.mp4', '.webm')):
+                    await update.message.reply_video(video=open(file_path, 'rb'),
+                                                     caption='Aquí tienes tu video.')
+                else:
+                    await update.message.reply_audio(audio=open(file_path, 'rb'),
+                                                     caption='Aquí tienes tu audio.')
+async def descargar_audio(update: Update, url: str):
+    """Extrae el enlace de audio usando Selenium y lo descarga en formato MP3 con un nombre aleatorio."""
+    await update.message.reply_text("Descargando audio...")
     options = Options()
-    options.add_argument('--headless')  # Ejecutar en modo sin cabeza (sin GUI)
+    options.add_argument('--headless')
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    
+    try:
+        driver.get(url)
+        driver.implicitly_wait(10)
+        
+        # Buscamos el contenedor del reproductor, identificado por el id "mse"
+        try:
+            container = driver.find_element(By.ID, "mse")
+        except Exception as e:
+            await update.message.reply_text("No se encontró el contenedor del reproductor de audio.")
+            return
+        
+        # Buscamos el elemento <video>
+        try:
+            video = container.find_element(By.TAG_NAME, "video")
+        except Exception as e:
+            await update.message.reply_text("No se encontró el elemento de video en el contenedor.")
+            return
+        
+        audio_url = video.get_attribute("src")
+        if not audio_url:
+            await update.message.reply_text("El elemento de video no tiene atributo src.")
+            return
+        
+        # Validamos que el recurso sea de tipo audio
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+        }
+        head_resp = requests.head(audio_url, headers=headers, allow_redirects=True)
+        content_type = head_resp.headers.get("Content-Type", "").lower()
+        if "audio" not in content_type:
+            await update.message.reply_text("El recurso obtenido no parece ser audio.")
+            return
+        
+        # Descargamos el audio
+        response = requests.get(audio_url, headers=headers)
+        if response.status_code == 200:
+            # Generar un nombre de archivo aleatorio
+            random_filename = f"{uuid.uuid4()}.mp3"
+            file_path = DOWNLOADS_DIR / random_filename
+            
+            with open(file_path, 'wb') as f:
+                f.write(response.content)
+                
+            await update.message.reply_audio(audio=open(file_path, 'rb'),
+                                             caption='Aquí tienes tu audio.')
+            os.remove(file_path)
+        else:
+            await update.message.reply_text("No se pudo descargar el audio desde el enlace extraído.")
+    except Exception as e:
+        logger.error(f"Error en descargar_audio: {e}")
+        await update.message.reply_text("Ocurrió un error al procesar el audio.")
+    finally:
+        driver.quit()
+async def descargar_fotos(update: Update, url: str):
+    """Extrae y envía fotos de una publicación de TikTok usando Selenium."""
+    await update.message.reply_text("Descargando imágenes...")
+    options = Options()
+    options.add_argument('--headless')
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     driver.get(url)
-    driver.implicitly_wait(10)  # Esperar hasta 10 segundos
-    # Busca el contenedor de imágenes
-    photo_container = driver.find_element(By.CLASS_NAME, 'css-kgj69c-DivPhotoVideoContainer')
-    image_urls = set()  # Usar un conjunto para evitar duplicados
-    if photo_container:
-        images = photo_container.find_elements(By.CSS_SELECTOR, 'img.css-brxox6-ImgPhotoSlide')
-        logging.info(f'Número total de imágenes encontradas: {len(images)}')
-        for img in images:
-            img_url = img.get_attribute('src')
-            logging.info(f'URL de imagen encontrada: {img_url}')  # Log de la URL encontrada
-            # Filtrar URLs basadas en un patrón más general
-            if re.search(r'tiktokcdn.*?\.jpeg', img_url):
-                image_urls.add(img_url)
-    else:
-        logging.error("No se encontró el contenedor de imágenes.")
-        
-    driver.quit()
-    return list(image_urls)
-async def start(update, context):
-    """Maneja el comando /start"""
-    await update.message.reply_text('¡Hola! Envíame un enlace de TikTok y descargaré el contenido para ti.')
-async def download_tiktok(update, context):
-    """Maneja los enlaces de TikTok"""
-    url = update.message.text
-    # Verifica si es un enlace de TikTok
-    if not re.match(r'https?://(?:www\.)?(?:vm\.)?tiktok\.com/', url):
-        await update.message.reply_text('Por favor, envía un enlace válido de TikTok.')
-        return
+    driver.implicitly_wait(10)
     try:
-        # Manejo de enlaces acortados
-        response = requests.get(url, allow_redirects=True)
-        final_url = response.url  # Obtiene la URL final después de la redirección
-        logging.info(f'URL final después de redirección: {final_url}')
-        # Verifica si el enlace es de un video o audio
-        if re.search(r'/video/', final_url):
-            # Configuración de yt-dlp
-            ydl_opts = {
-                'format': 'best',
-                'outtmpl': 'downloads/%(id)s.%(ext)s',
-                'quiet': True
-            }
-            await update.message.reply_text('Descargando contenido de video o audio...')
-            # Descarga el contenido
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(final_url, download=True)
-                file_path = ydl.prepare_filename(info)
-            # Envía el archivo según su tipo
-            if file_path.endswith(('.mp4', '.webm')):
-                await update.message.reply_video(
-                    video=open(file_path, 'rb'),
-                    caption='Aquí tienes tu video de TikTok'
-                )
-            elif file_path.endswith(('.mp3', '.m4a', '.wav')):
-                await update.message.reply_audio(
-                    audio=open(file_path, 'rb'),
-                    caption='Aquí tienes tu audio de TikTok'
-                )
-            # Limpia el archivo descargado
-            os.remove(file_path)
-        # Si el enlace es de una foto o álbum de fotos
-        elif re.search(r'/photo/', final_url) or re.search(r'/share/', final_url):
-            await update.message.reply_text('Descargando contenido de imágenes...')
-            image_urls = await get_images_from_tiktok(final_url)  # Llama a la función para obtener imágenes
-            if image_urls:
-                for img_url in image_urls:
-                    await update.message.reply_photo(photo=img_url, caption='Aquí tienes una imagen de TikTok')
-            else:
-                await update.message.reply_text('No se encontraron imágenes en el enlace proporcionado.')
+        images = driver.find_elements(By.CSS_SELECTOR, 'img')
+        image_urls = [img.get_attribute('src') for img in images if img.get_attribute('src')]
+        if image_urls:
+            media_group = [InputMediaPhoto(media=url) for url in image_urls[:10]]
+            await update.message.reply_media_group(media=media_group)
         else:
-            await update.message.reply_text('Lo siento, no puedo manejar este tipo de enlace.')
-    except requests.exceptions.RequestException as e:
-        logging.error(f'Error en la solicitud HTTP: {str(e)}')
-        await update.message.reply_text('Hubo un problema al acceder al enlace. Intenta de nuevo más tarde.')
-    except Exception as e:
-        logging.error(f'Error inesperado: {str(e)}')
-        await update.message.reply_text(f'Lo siento, hubo un error al descargar el contenido: {str(e)}')
+            await update.message.reply_text("No se encontraron imágenes en este TikTok.")
+    except NoSuchElementException:
+        await update.message.reply_text("Error al extraer imágenes de la publicación.")
+    finally:
+        driver.quit()
+async def procesar_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Procesa el mensaje del usuario y ejecuta la acción según el tipo de contenido."""
+    url = update.message.text.strip()
+    if not re.match(TIKTOK_URL_PATTERN, url):
+        await update.message.reply_text('Envía un enlace válido de TikTok.')
+        return
+    tipo = await get_tipo_contenido(url)
+    if tipo == "video":
+        await descargar_video(update, url)
+    elif tipo == "fotos":
+        await descargar_fotos(update, url)
+    elif tipo == "audio":
+        await descargar_audio(update, url)
+    else:
+        await update.message.reply_text('No puedo manejar este enlace.')
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('¡Hola! Envíame un enlace de TikTok y te descargaré el contenido.')
 def main():
-    """Función principal del bot"""
-    # Crea el directorio de descargas si no existe
-    if not os.path.exists('downloads'):
-        os.makedirs('downloads')
-    # Configura y inicia el bot
+    """Inicia el bot."""
+    DOWNLOADS_DIR.mkdir(exist_ok=True)
     application = Application.builder().token(TOKEN).build()
-    # Añade los manejadores
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_tiktok))
-    # Inicia el bot con manejo de errores
-    try:
-        application.run_polling(poll_interval=1.0, timeout=30)
-    except NetworkError as e:
-        logging.error(f"Error de red: {e}")
-    except Exception as e:
-        logging.error(f"Error inesperado: {e}")
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_tiktok))
+    application.run_polling(poll_interval=1.0, timeout=30)
 if __name__ == '__main__':
     main()
