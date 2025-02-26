@@ -10,15 +10,6 @@ Este es un bot de Telegram que permite a los usuarios enviar enlaces de TikTok y
 
 ## Requisitos
 
-Asegúrate de tener instalado Python 3.7 o superior y las siguientes bibliotecas:
-
-- `requests`
-- `selenium`
-- `yt-dlp`
-- `python-telegram-bot`
-- `webdriver-manager`
-- `beautifulsoup4`
-
 Puedes instalar todas las dependencias necesarias ejecutando:
 
 ```bash
@@ -54,4 +45,4 @@ pip install -r requirements.txt
 
 ## Uso
 
-Envía un enlace de TikTok al bot y este descargará el contenido correspondiente. Puedes usar enlaces de videos, audios o álbumes de fotos.
+Envía un enlace de TikTok al bot y este descargará el contenido correspondiente. Puedes usar enlaces de videos, audios o fotos.
