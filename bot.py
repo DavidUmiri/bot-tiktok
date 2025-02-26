@@ -31,21 +31,25 @@ TIKTOK_URL_PATTERN = r"https?://(?:www\.)?(?:vm\.)?tiktok\.com/"
 BROWSER_TIMEOUT = 15  # segundos
 REQUEST_TIMEOUT = 10  # segundos
 BROWSER_OPTIONS = {
-    "--headless": None,
+    "--headless": "new",  # Use new headless mode
     "--disable-gpu": None,
     "--no-sandbox": None,
     "--disable-dev-shm-usage": None,
+    "--disable-setuid-sandbox": None,
+    "--window-size=1920,1080": None,
     "--disable-extensions": None,
-    "--disable-logging": None,
+    "--proxy-server='direct://'" : None,
+    "--proxy-bypass-list=*" : None,
+    "--start-maximized" : None,
+    "--disable-gpu" : None,
+    "--disable-dev-shm-usage" : None,
+    "--no-sandbox" : None,
+    "--ignore-certificate-errors": None,
+    "--allow-running-insecure-content": None,
+    "--disable-web-security": None,
+    "--disable-client-side-phishing-detection": None,
     "--disable-notifications": None,
     "--disable-default-apps": None,
-    "--disable-popup-blocking": None,
-    "--use-gl=swiftshader": None,
-    "--disable-software-rasterizer": None,
-    "--ignore-gpu-blocklist": None,
-    "--enable-webgl": None,
-    "--memory-pressure-off": None,
-    "--js-flags=--max-old-space-size=2048": None,
 }
 
 # Configuración de logs
