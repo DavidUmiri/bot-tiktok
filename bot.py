@@ -216,33 +216,58 @@ async def descargar_fotos(update: Update, url: str):
     try:
         driver.get(url)
         driver.implicitly_wait(BROWSER_TIMEOUT)
-        images = driver.find_elements(By.CSS_SELECTOR, "img.swiper-image")
+        
+        # Try multiple selectors for images
+        image_selectors = [
+            "img.swiper-image",
+            "img.tiktok-image",
+            "div[class*='image-container'] img",
+            "div[class*='slide-container'] img"
+        ]
+        
+        images = []
+        for selector in image_selectors:
+            try:
+                found_images = driver.find_elements(By.CSS_SELECTOR, selector)
+                if found_images:
+                    images = found_images
+                    logger.info(f"Found images using selector: {selector}")
+                    break
+            except Exception as e:
+                logger.debug(f"Selector {selector} failed: {e}")
+                continue
+
         if not images:
             raise ValueError("No se encontraron imágenes")
 
         media_group = []
         for i, img in enumerate(images):
-            img_url = img.get_attribute("src")
-            if not img_url:
-                continue
+            try:
+                img_url = img.get_attribute("src")
+                if not img_url:
+                    continue
 
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-            }
-            response = requests.get(img_url, headers=headers, timeout=REQUEST_TIMEOUT)
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+                    "Referer": url
+                }
+                response = requests.get(img_url, headers=headers, timeout=REQUEST_TIMEOUT)
 
-            if response.status_code == 200:
-                unique_filename = f"image_{uuid.uuid4().hex[:8]}.jpg"
-                file_path = DOWNLOADS_DIR / unique_filename
-                with open(file_path, "wb") as f:
-                    f.write(response.content)
+                if response.status_code == 200:
+                    unique_filename = f"image_{uuid.uuid4().hex[:8]}.jpg"
+                    file_path = DOWNLOADS_DIR / unique_filename
+                    with open(file_path, "wb") as f:
+                        f.write(response.content)
 
-                media_group.append(
-                    InputMediaPhoto(
-                        media=open(file_path, "rb"),
-                        caption="Aquí tienes tu imagen." if i == 0 else "",
+                    media_group.append(
+                        InputMediaPhoto(
+                            media=open(file_path, "rb"),
+                            caption="Aquí tienes tu imagen." if i == 0 else "",
+                        )
                     )
-                )
+            except Exception as e:
+                logger.warning(f"Error processing image {i}: {e}")
+                continue
 
         if media_group:
             await update.message.reply_media_group(media=media_group)
