@@ -337,4 +337,5 @@ def main():
         cleanup_instance()
 
 
-if __name__ == "__
+if __name__ == "__main__":
+    main()
