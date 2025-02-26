@@ -31,25 +31,21 @@ TIKTOK_URL_PATTERN = r"https?://(?:www\.)?(?:vm\.)?tiktok\.com/"
 BROWSER_TIMEOUT = 15  # segundos
 REQUEST_TIMEOUT = 10  # segundos
 BROWSER_OPTIONS = {
-    "--headless": "new",  # Use new headless mode
+    "--headless": None,
     "--disable-gpu": None,
     "--no-sandbox": None,
     "--disable-dev-shm-usage": None,
-    "--disable-setuid-sandbox": None,
-    "--window-size=1920,1080": None,
     "--disable-extensions": None,
-    "--proxy-server='direct://'" : None,
-    "--proxy-bypass-list=*" : None,
-    "--start-maximized" : None,
-    "--disable-gpu" : None,
-    "--disable-dev-shm-usage" : None,
-    "--no-sandbox" : None,
-    "--ignore-certificate-errors": None,
-    "--allow-running-insecure-content": None,
-    "--disable-web-security": None,
-    "--disable-client-side-phishing-detection": None,
+    "--disable-logging": None,
     "--disable-notifications": None,
     "--disable-default-apps": None,
+    "--disable-popup-blocking": None,
+    "--use-gl=swiftshader": None,
+    "--disable-software-rasterizer": None,
+    "--ignore-gpu-blocklist": None,
+    "--enable-webgl": None,
+    "--memory-pressure-off": None,
+    "--js-flags=--max-old-space-size=2048": None,
 }
 
 # Configuración de logs
@@ -177,38 +173,57 @@ async def descargar_fotos(update: Update, url: str):
     options = Options()
     for option, value in BROWSER_OPTIONS.items():
         options.add_argument(option)
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
 
     driver = webdriver.Chrome(
         service=Service(ChromeDriverManager().install()), options=options
     )
+    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+        "source": """
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined})
+        """
+    })
     driver.set_page_load_timeout(BROWSER_TIMEOUT)
 
     try:
         driver.get(url)
-        # Wait for the page to load completely
-        driver.implicitly_wait(BROWSER_TIMEOUT)
-        # Wait for dynamic content to load
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        # Add a small delay to ensure all images are loaded
-        import time
-        time.sleep(2)
+        # Wait for the page to load and scroll multiple times
+        for _ in range(3):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1)
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(1)
         
-        # Get all image elements with a more specific selector
-        images = driver.find_elements(By.CSS_SELECTOR, "img[src*='tiktokcdn']")
+        # Try multiple selectors to find images
+        selectors = [
+            "img[src*='tiktokcdn']",
+            "img[class*='image']",
+            "img[class*='photo']",
+            "img[class*='slide']"
+        ]
         
-        # Collect image URLs with improved filtering
-        image_urls = []
-        for img in images:
+        image_urls = set()
+        for selector in selectors:
             try:
-                src = img.get_attribute("src")
-                if src and not src.endswith((".gif", ".svg")):
-                    # Get image dimensions
-                    width = img.get_attribute("width")
-                    height = img.get_attribute("height")
-                    if width and height and int(width) >= 100 and int(height) >= 100:
-                        image_urls.append(src)
+                images = driver.find_elements(By.CSS_SELECTOR, selector)
+                for img in images:
+                    try:
+                        src = img.get_attribute("src")
+                        if src and not src.endswith((".gif", ".svg")):
+                            # Filter out small images and icons
+                            width = img.get_attribute("width")
+                            height = img.get_attribute("height")
+                            if width and height:
+                                w, h = int(width), int(height)
+                                if w >= 200 and h >= 200:
+                                    image_urls.add(src)
+                    except Exception as e:
+                        logger.warning(f"Error processing image element: {e}")
+                        continue
             except Exception as e:
-                logger.warning(f"Error processing image element: {e}")
+                logger.warning(f"Error with selector {selector}: {e}")
                 continue
         
         # Remove duplicates while preserving order
