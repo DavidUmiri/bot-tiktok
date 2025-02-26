@@ -19,7 +19,6 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 from selenium.common.exceptions import NoSuchElementException, WebDriverException
-from webdriver_manager.chrome import ChromeDriverManager
 
 # Cargar variables de entorno
 load_dotenv()
@@ -29,7 +28,8 @@ TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise ValueError("BOT_TOKEN no está configurado en las variables de entorno")
 
-DOWNLOADS_DIR = Path("downloads")
+# Usar directorio temporal en lugar de local
+DOWNLOADS_DIR = Path(tempfile.gettempdir()) / "tiktok_downloads"
 TIKTOK_URL_PATTERN = r'https?://(?:www\.)?(?:vm\.)?tiktok\.com/'
 
 # Configuración de logs
@@ -93,8 +93,14 @@ async def descargar_fotos(update: Update, url: str):
     options.add_argument('--headless')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--disable-gpu')
+    options.binary_location = os.getenv("GOOGLE_CHROME_BIN", "/usr/bin/google-chrome")
+    
     try:
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        driver = webdriver.Chrome(
+            service=Service(os.getenv("CHROMEDRIVER_PATH", "/usr/local/bin/chromedriver")),
+            options=options
+        )
         driver.get(url)
         driver.implicitly_wait(10)
         images = driver.find_elements(By.CSS_SELECTOR, 'img')
@@ -134,7 +140,22 @@ def main():
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, procesar_tiktok))
-    application.run_polling(poll_interval=1.0, timeout=30)
+    
+    # Usar PORT de Railway si está disponible
+    port = int(os.getenv("PORT", 8443))
+    
+    # Si estamos en Railway (PORT está definido), usar webhooks
+    if "PORT" in os.environ:
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            webhook_url=os.getenv("WEBHOOK_URL"),
+            cert=None,
+            key=None
+        )
+    else:
+        # En desarrollo local usar polling
+        application.run_polling(poll_interval=1.0, timeout=30)
 
 if __name__ == '__main__':
     main()
