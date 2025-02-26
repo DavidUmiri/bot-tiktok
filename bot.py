@@ -146,10 +146,15 @@ def main():
     
     # Si estamos en Railway (PORT está definido), usar webhooks
     if "PORT" in os.environ:
+        # Construir la URL del webhook usando el dominio de Railway
+        project_name = os.getenv("RAILWAY_PROJECT_NAME", "")
+        railway_domain = f"https://{project_name}.up.railway.app"
+        logger.info(f"Configurando webhook con URL: {railway_domain}")
+        
         application.run_webhook(
             listen="0.0.0.0",
             port=port,
-            webhook_url=os.getenv("WEBHOOK_URL"),
+            webhook_url=railway_domain,
             cert=None,
             key=None
         )
